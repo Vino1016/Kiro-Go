@@ -905,6 +905,9 @@ func cloneSchemaValue(v interface{}) interface{} {
 // cleanSchema 递归清理会导致 Kiro 400 的 schema 字段。
 func cleanSchema(m map[string]interface{}) {
 	delete(m, "additionalProperties")
+	// Codex uses this non-standard marker for its client-side multi-agent
+	// transport. Kiro rejects it as an unsupported JSON Schema keyword.
+	delete(m, "encrypted")
 
 	// required 必须是非空数组，否则 Kiro 会报 Improperly formed request。
 	if req, exists := m["required"]; exists {
@@ -1107,6 +1110,9 @@ type OpenAITool struct {
 		Description string      `json:"description"`
 		Parameters  interface{} `json:"parameters"`
 	} `json:"function"`
+	// Namespace is populated when a Responses namespace wrapper is flattened.
+	// Codex expects it beside the bare tool name in function_call output.
+	Namespace string `json:"-"`
 }
 
 // UnmarshalJSON accepts both the Chat Completions tool shape, where the tool
@@ -2096,6 +2102,17 @@ func parseBase64Image(data, format string) *KiroImage {
 	}
 }
 
+var customToolInputSchema = map[string]interface{}{
+	"type": "object",
+	"properties": map[string]interface{}{
+		"input": map[string]interface{}{
+			"type":        "string",
+			"description": "Raw text input for this tool.",
+		},
+	},
+	"required": []interface{}{"input"},
+}
+
 func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 	if len(tools) == 0 {
 		return nil
@@ -2103,7 +2120,7 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Type != "function" {
+		if tool.Type != "function" && tool.Type != "custom" {
 			continue
 		}
 		desc := tool.Function.Description
@@ -2118,7 +2135,11 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
-		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		if tool.Type == "custom" {
+			wrapper.ToolSpecification.InputSchema = InputSchema{JSON: customToolInputSchema}
+		} else {
+			wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		}
 		result = append(result, wrapper)
 	}
 	return result

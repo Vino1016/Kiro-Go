@@ -578,11 +578,15 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 	var totalCredits float64
 	var contextUsagePercentages []float64
 	var sawOutput bool
+	var sawToolUse bool
+	var sawMetering bool
+	var sawExplicitStopReason bool
 	pending := &pendingToolUses{}
 	trackedCallback := *callback
 	originalOnToolUse := trackedCallback.OnToolUse
 	trackedCallback.OnToolUse = func(toolUse KiroToolUse) {
 		sawOutput = true
+		sawToolUse = true
 		if originalOnToolUse != nil {
 			emitted = true
 			originalOnToolUse(toolUse)
@@ -666,6 +670,7 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 				return emitted, toolErr
 			}
 		case "meteringEvent":
+			sawMetering = true
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}
@@ -677,8 +682,11 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 			// stopReason rides inside metadataEvent on the wire; there is no
 			// standalone stop reason event type. Its absence after content is
 			// how callers detect a truncated stream.
-			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" && callback.OnStopReason != nil {
-				callback.OnStopReason(reason)
+			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" {
+				sawExplicitStopReason = true
+				if callback.OnStopReason != nil {
+					callback.OnStopReason(reason)
+				}
 			}
 		}
 	}
@@ -689,6 +697,16 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 	}
 	if !sawOutput {
 		return emitted, errEmptyKiroStream
+	}
+	// Enterprise/CLI backends may end a complete turn with meteringEvent and
+	// clean EOF but no metadataEvent. Use metering only as a fallback terminal
+	// signal; an explicit upstream reason such as MAX_TOKENS always wins.
+	if sawMetering && !sawExplicitStopReason && callback.OnStopReason != nil {
+		reason := "end_turn"
+		if sawToolUse {
+			reason = "tool_use"
+		}
+		callback.OnStopReason(reason)
 	}
 	if callback.OnCredits != nil && totalCredits > 0 {
 		callback.OnCredits(totalCredits)

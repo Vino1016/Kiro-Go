@@ -506,6 +506,65 @@ func TestParseEventStreamTrackedReportsEmissionOnCleanStream(t *testing.T) {
 	}
 }
 
+func TestParseEventStreamTrackedUsesMeteringAsFallbackTerminalSignal(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		events     [][]byte
+		wantReason string
+	}{
+		{
+			name: "text turn",
+			events: [][]byte{
+				awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "done"}),
+				awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.25}),
+			},
+			wantReason: "end_turn",
+		},
+		{
+			name: "tool turn",
+			events: [][]byte{
+				awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+					"toolUseId": "tool_1", "name": "lookup", "input": `{"q":"x"}`, "stop": true,
+				}),
+				awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 0.5}),
+			},
+			wantReason: "tool_use",
+		},
+		{
+			name: "explicit upstream reason wins",
+			events: [][]byte{
+				awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "partial"}),
+				awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "MAX_TOKENS"}),
+				awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}),
+			},
+			wantReason: "MAX_TOKENS",
+		},
+		{
+			name: "context usage is not terminal",
+			events: [][]byte{
+				awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "partial"}),
+				awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 12.5}),
+			},
+			wantReason: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reason string
+			_, err := parseEventStreamTracked(bytes.NewReader(bytes.Join(tc.events, nil)), &KiroStreamCallback{
+				OnText:       func(string, bool) {},
+				OnToolUse:    func(KiroToolUse) {},
+				OnStopReason: func(got string) { reason = got },
+			})
+			if err != nil {
+				t.Fatalf("parse stream: %v", err)
+			}
+			if reason != tc.wantReason {
+				t.Fatalf("stop reason=%q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestParseEventStreamTrackedThinkingCountsAsEmission(t *testing.T) {
 	frame := awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
 		"text": "let me think",

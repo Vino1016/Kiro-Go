@@ -502,3 +502,123 @@ func TestResponsesStreamSSE(t *testing.T) {
 		t.Fatalf("expected stream content delta, got:\n%s", bodyStr)
 	}
 }
+
+func TestExtractResponsesToolsAdditionalTools(t *testing.T) {
+	raw := json.RawMessage(`[
+		{
+			"type":"additional_tools",
+			"role":"developer",
+			"tools":[
+				{"type":"custom","name":"exec","description":"Run JS"},
+				{"type":"function","name":"wait","description":"Wait","parameters":{"type":"object","properties":{"cell_id":{"type":"string"}}}},
+				{"type":"namespace","name":"collaboration","tools":[
+					{"type":"function","name":"spawn_agent","description":"Spawn","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
+				]}
+			]
+		},
+		{"type":"message","role":"user","content":"hi"}
+	]`)
+
+	tools := extractResponsesTools(raw)
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d (%+v)", len(tools), tools)
+	}
+	byName := make(map[string]OpenAITool, len(tools))
+	for _, tool := range tools {
+		byName[tool.Function.Name] = tool
+	}
+	if tool := byName["exec"]; tool.Type != "custom" {
+		t.Fatalf("expected custom exec tool, got %+v", tool)
+	}
+	if tool := byName["spawn_agent"]; tool.Type != "function" || tool.Namespace != "collaboration" {
+		t.Fatalf("expected collaboration spawn_agent, got %+v", tool)
+	}
+}
+
+func TestConvertOpenAIToolsSupportsCustomAndCleansEncrypted(t *testing.T) {
+	custom := OpenAITool{Type: "custom"}
+	custom.Function.Name = "exec"
+	custom.Function.Description = "Run JS"
+
+	function := OpenAITool{Type: "function"}
+	function.Function.Name = "spawn_agent"
+	function.Function.Parameters = map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"message": map[string]interface{}{"type": "string", "encrypted": true},
+		},
+	}
+
+	wrapped := convertOpenAITools([]OpenAITool{custom, function})
+	if len(wrapped) != 2 {
+		t.Fatalf("expected 2 converted tools, got %d", len(wrapped))
+	}
+	customSchema := wrapped[0].ToolSpecification.InputSchema.JSON.(map[string]interface{})
+	customProps := customSchema["properties"].(map[string]interface{})
+	if _, ok := customProps["input"]; !ok {
+		t.Fatalf("custom tool schema missing input property: %+v", customSchema)
+	}
+	functionSchema := wrapped[1].ToolSpecification.InputSchema.JSON.(map[string]interface{})
+	messageSchema := functionSchema["properties"].(map[string]interface{})["message"].(map[string]interface{})
+	if _, ok := messageSchema["encrypted"]; ok {
+		t.Fatalf("Kiro-incompatible encrypted keyword was not removed: %+v", messageSchema)
+	}
+}
+
+func TestResponsesParseCustomToolCallAndAgentMessage(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[
+			{"type":"input_text","text":"Message Type: NEW_TASK"},
+			{"type":"encrypted_content","encrypted_content":"reply with exactly: PONG"}
+		]},
+		{"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"console.log(1)"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"1"}
+	]`)
+
+	msgs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatalf("parse Responses input: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d (%+v)", len(msgs), msgs)
+	}
+	if text, _ := msgs[0].Content.(string); !strings.Contains(text, "reply with exactly: PONG") {
+		t.Fatalf("agent task was dropped: %q", text)
+	}
+	if msgs[1].Role != "assistant" || len(msgs[1].ToolCalls) != 1 {
+		t.Fatalf("expected assistant custom tool call, got %+v", msgs[1])
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(msgs[1].ToolCalls[0].Function.Arguments), &args); err != nil {
+		t.Fatalf("decode custom tool arguments: %v", err)
+	}
+	if args["input"] != "console.log(1)" {
+		t.Fatalf("unexpected custom tool input: %+v", args)
+	}
+	if msgs[2].Role != "tool" || msgs[2].ToolCallID != "call_1" || msgs[2].Content != "1" {
+		t.Fatalf("unexpected custom tool output: %+v", msgs[2])
+	}
+}
+
+func TestBuildResponsesObjectPreservesCustomTypeAndNamespace(t *testing.T) {
+	custom := OpenAITool{Type: "custom"}
+	custom.Function.Name = "exec"
+	namespaced := OpenAITool{Type: "function", Namespace: "collaboration"}
+	namespaced.Function.Name = "spawn_agent"
+	req := &ResponsesRequest{Tools: []OpenAITool{custom, namespaced}}
+
+	obj := buildResponsesObject("resp_1", "claude-sonnet-4.5", "", []KiroToolUse{
+		{ToolUseID: "call_exec", Name: "exec", Input: map[string]interface{}{"input": "console.log(1)"}},
+		{ToolUseID: "call_spawn", Name: "spawn_agent", Input: map[string]interface{}{"message": "hi"}},
+	}, 0, 0, req, "tool_use")
+
+	if len(obj.Output) != 2 {
+		t.Fatalf("expected 2 output items, got %+v", obj.Output)
+	}
+	if obj.Output[0].Type != "custom_tool_call" || obj.Output[0].Input != "console.log(1)" {
+		t.Fatalf("unexpected custom tool output: %+v", obj.Output[0])
+	}
+	if obj.Output[1].Type != "function_call" || obj.Output[1].Namespace != "collaboration" {
+		t.Fatalf("unexpected namespaced function output: %+v", obj.Output[1])
+	}
+}

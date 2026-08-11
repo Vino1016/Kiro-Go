@@ -74,7 +74,16 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 				messages = append(messages, *msg)
 			}
 
-		case typ == "function_call_output" || typ == "tool_result":
+		case typ == "additional_tools":
+			// Tool declarations are extracted separately and are not messages.
+
+		case typ == "agent_message":
+			flushPendingUser()
+			if text := extractAgentMessageText(obj); text != "" {
+				messages = append(messages, OpenAIMessage{Role: "user", Content: text})
+			}
+
+		case typ == "function_call_output" || typ == "tool_result" || typ == "custom_tool_call_output":
 			flushPendingUser()
 			callID, _ := obj["call_id"].(string)
 			if callID == "" {
@@ -98,23 +107,16 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 			}
 			tc.Function.Name, _ = obj["name"].(string)
 			tc.Function.Arguments = stringifyArbitrary(obj["arguments"])
-			// Merge consecutive function_call items into a single assistant
-			// message so parallel tool calls stay grouped in one turn. The
-			// Responses API emits each parallel call as a separate input item;
-			// keeping them in one assistant message preserves the tool_use /
-			// tool_result pairing that Kiro requires.
-			if n := len(messages); n > 0 &&
-				messages[n-1].Role == "assistant" &&
-				len(messages[n-1].ToolCalls) > 0 &&
-				strings.TrimSpace(extractOpenAIMessageText(messages[n-1].Content)) == "" {
-				messages[n-1].ToolCalls = append(messages[n-1].ToolCalls, tc)
-			} else {
-				messages = append(messages, OpenAIMessage{
-					Role:      "assistant",
-					Content:   "",
-					ToolCalls: []ToolCall{tc},
-				})
-			}
+			messages = appendAssistantToolCall(messages, tc)
+
+		case typ == "custom_tool_call":
+			flushPendingUser()
+			tc := ToolCall{ID: stringField(obj, "call_id", "id"), Type: "function"}
+			tc.Function.Name, _ = obj["name"].(string)
+			input := stringifyArbitrary(obj["input"])
+			args, _ := json.Marshal(map[string]string{"input": input})
+			tc.Function.Arguments = string(args)
+			messages = appendAssistantToolCall(messages, tc)
 
 		case typ == "input_text" || typ == "text":
 			text, _ := obj["text"].(string)
@@ -148,6 +150,79 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 
 	flushPendingUser()
 	return messages, nil
+}
+
+func appendAssistantToolCall(messages []OpenAIMessage, tc ToolCall) []OpenAIMessage {
+	if n := len(messages); n > 0 &&
+		messages[n-1].Role == "assistant" &&
+		len(messages[n-1].ToolCalls) > 0 &&
+		strings.TrimSpace(extractOpenAIMessageText(messages[n-1].Content)) == "" {
+		messages[n-1].ToolCalls = append(messages[n-1].ToolCalls, tc)
+		return messages
+	}
+	return append(messages, OpenAIMessage{
+		Role:      "assistant",
+		Content:   "",
+		ToolCalls: []ToolCall{tc},
+	})
+}
+
+// extractResponsesTools finds Codex tool declarations embedded in Responses
+// input items instead of the top-level tools field.
+func extractResponsesTools(raw json.RawMessage) []OpenAITool {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed[0] != '[' {
+		return nil
+	}
+
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+
+	var tools []OpenAITool
+	for _, item := range items {
+		var block struct {
+			Type  string            `json:"type"`
+			Tools []json.RawMessage `json:"tools"`
+		}
+		if err := json.Unmarshal(item, &block); err != nil || block.Type != "additional_tools" {
+			continue
+		}
+		for _, tool := range block.Tools {
+			tools = append(tools, decodeResponsesTool(tool)...)
+		}
+	}
+	return tools
+}
+
+func decodeResponsesTool(raw json.RawMessage) []OpenAITool {
+	var head struct {
+		Type  string            `json:"type"`
+		Name  string            `json:"name"`
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil
+	}
+	if head.Type == "namespace" {
+		var tools []OpenAITool
+		for _, nested := range head.Tools {
+			for _, tool := range decodeResponsesTool(nested) {
+				if tool.Namespace == "" {
+					tool.Namespace = head.Name
+				}
+				tools = append(tools, tool)
+			}
+		}
+		return tools
+	}
+
+	var tool OpenAITool
+	if err := json.Unmarshal(raw, &tool); err != nil {
+		return nil
+	}
+	return []OpenAITool{tool}
 }
 
 func buildMessageFromInputItem(obj map[string]interface{}, role string) *OpenAIMessage {
@@ -204,6 +279,30 @@ func buildMessageFromInputItem(obj map[string]interface{}, role string) *OpenAIM
 	}
 
 	return nil
+}
+
+func extractAgentMessageText(obj map[string]interface{}) string {
+	content, _ := obj["content"].([]interface{})
+	var parts []string
+	for _, value := range content {
+		part, ok := value.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch part["type"] {
+		case "input_text":
+			if text, ok := part["text"].(string); ok && text != "" {
+				parts = append(parts, text)
+			}
+		case "encrypted_content":
+			// For non-ChatGPT providers Codex does not negotiate encryption;
+			// this field contains the plaintext agent task.
+			if text, ok := part["encrypted_content"].(string); ok && text != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func stringifyArbitrary(v interface{}) string {
