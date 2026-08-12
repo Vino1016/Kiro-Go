@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vino.kiro-go</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>-u</string>
+        <string>GITLAB_TOKEN</string>
+        <string>-u</string>
+        <string>OFFICE_TOKEN</string>
+        <string>__KIRO_GO_DIR__/kiro-go</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__KIRO_GO_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CONFIG_PATH</key>
+        <string>__KIRO_GO_DIR__/data/config.json</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>__KIRO_GO_DIR__/logs/kiro-go.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__KIRO_GO_DIR__/logs/kiro-go.error.log</string>
+</dict>
+</plist>

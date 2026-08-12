@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kiro-Go Installer"
+  short_description: "安装并配置 Codex 使用 Kiro 模型与积分"
+  default_prompt: "Use $kiro-go-installer to install and configure Kiro-Go and CC Switch on this Mac."
