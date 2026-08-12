@@ -30,9 +30,12 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
-	if extra := extractResponsesTools(req.Input); len(extra) > 0 {
-		req.Tools = append(req.Tools, extra...)
+	topLevelTools, err := decodeResponsesTopLevelTools(body)
+	if err != nil {
+		h.sendOpenAIError(w, 400, "invalid_request_error", "Invalid tools")
+		return
 	}
+	req.Tools = mergeResponsesTools(topLevelTools, extractResponsesTools(req.Input))
 
 	if strings.TrimSpace(req.Model) == "" {
 		req.Model = defaultResponsesModel
@@ -76,6 +79,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 	finalMessages = append(finalMessages, inputMessages...)
+	rewriteResponsesToolCallNames(finalMessages, req.Tools)
 
 	if len(finalMessages) == 0 {
 		h.sendOpenAIError(w, 400, "invalid_request_error", "input must contain at least one message")
@@ -256,26 +260,6 @@ func mapResponsesCompletion(reason string) (status, incompleteReason string) {
 	}
 }
 
-func customToolNameSet(tools []OpenAITool) map[string]bool {
-	set := make(map[string]bool, len(tools))
-	for _, tool := range tools {
-		if tool.Type == "custom" {
-			set[tool.Function.Name] = true
-		}
-	}
-	return set
-}
-
-func toolNamespaceMap(tools []OpenAITool) map[string]string {
-	namespaces := make(map[string]string, len(tools))
-	for _, tool := range tools {
-		if tool.Namespace != "" {
-			namespaces[tool.Function.Name] = tool.Namespace
-		}
-	}
-	return namespaces
-}
-
 func customToolCallInput(input map[string]interface{}) string {
 	value, _ := input["input"].(string)
 	return value
@@ -286,8 +270,7 @@ func buildResponsesObject(
 	inputTokens, outputTokens int, req *ResponsesRequest, upstreamStopReason string,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
-	customTools := customToolNameSet(req.Tools)
-	namespaces := toolNamespaceMap(req.Tools)
+	toolBindings := kiroToolBindingsByName(req.Tools)
 
 	if strings.TrimSpace(content) != "" {
 		output = append(output, ResponseOutputItem{
@@ -303,13 +286,14 @@ func buildResponsesObject(
 	}
 
 	for _, tu := range toolUses {
-		if customTools[tu.Name] {
+		identity := resolveResponseToolCall(toolBindings, tu.Name)
+		if identity.Type == "custom" {
 			output = append(output, ResponseOutputItem{
 				ID:     generateOutputItemID("ctc"),
 				Type:   "custom_tool_call",
 				Status: "completed",
 				CallID: tu.ToolUseID,
-				Name:   tu.Name,
+				Name:   identity.Name,
 				Input:  customToolCallInput(tu.Input),
 			})
 			continue
@@ -320,8 +304,8 @@ func buildResponsesObject(
 			Type:      "function_call",
 			Status:    "completed",
 			CallID:    tu.ToolUseID,
-			Name:      tu.Name,
-			Namespace: namespaces[tu.Name],
+			Name:      identity.Name,
+			Namespace: identity.Namespace,
 			Arguments: string(args),
 		})
 	}
@@ -404,8 +388,7 @@ func (h *Handler) handleResponsesStream(
 	var lastErr error
 	responseStarted := false
 	reqStart := time.Now()
-	streamCustomTools := customToolNameSet(req.Tools)
-	streamToolNamespaces := toolNamespaceMap(req.Tools)
+	streamToolBindings := kiroToolBindingsByName(req.Tools)
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
@@ -519,7 +502,8 @@ func (h *Handler) handleResponsesStream(
 				}
 
 				toolUses = append(toolUses, tu)
-				if streamCustomTools[tu.Name] {
+				identity := resolveResponseToolCall(streamToolBindings, tu.Name)
+				if identity.Type == "custom" {
 					input := customToolCallInput(tu.Input)
 					ctcID := generateOutputItemID("ctc")
 					send("response.output_item.added", map[string]interface{}{
@@ -527,7 +511,7 @@ func (h *Handler) handleResponsesStream(
 						"output_index": outputIndex,
 						"item": map[string]interface{}{
 							"id": ctcID, "type": "custom_tool_call", "status": "in_progress",
-							"call_id": tu.ToolUseID, "name": tu.Name, "input": "",
+							"call_id": tu.ToolUseID, "name": identity.Name, "input": "",
 						},
 					})
 					send("response.custom_tool_call_input.delta", map[string]interface{}{
@@ -543,7 +527,7 @@ func (h *Handler) handleResponsesStream(
 						"output_index": outputIndex,
 						"item": map[string]interface{}{
 							"id": ctcID, "type": "custom_tool_call", "status": "completed",
-							"call_id": tu.ToolUseID, "name": tu.Name, "input": input,
+							"call_id": tu.ToolUseID, "name": identity.Name, "input": input,
 						},
 					})
 					outputIndex++
@@ -555,15 +539,15 @@ func (h *Handler) handleResponsesStream(
 				fcID := generateOutputItemID("fc")
 				addedItem := map[string]interface{}{
 					"id": fcID, "type": "function_call", "status": "in_progress",
-					"call_id": tu.ToolUseID, "name": tu.Name, "arguments": "",
+					"call_id": tu.ToolUseID, "name": identity.Name, "arguments": "",
 				}
 				doneItem := map[string]interface{}{
 					"id": fcID, "type": "function_call", "status": "completed",
-					"call_id": tu.ToolUseID, "name": tu.Name, "arguments": string(args),
+					"call_id": tu.ToolUseID, "name": identity.Name, "arguments": string(args),
 				}
-				if namespace := streamToolNamespaces[tu.Name]; namespace != "" {
-					addedItem["namespace"] = namespace
-					doneItem["namespace"] = namespace
+				if identity.Namespace != "" {
+					addedItem["namespace"] = identity.Namespace
+					doneItem["namespace"] = identity.Namespace
 				}
 				send("response.output_item.added", map[string]interface{}{
 					"type":         "response.output_item.added",

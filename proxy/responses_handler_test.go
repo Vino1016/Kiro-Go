@@ -503,6 +503,115 @@ func TestResponsesStreamSSE(t *testing.T) {
 	}
 }
 
+func TestResponsesNamespacedToolsRoundTrip(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non-stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			h, cleanup := setupResponsesTestHandler(t)
+			defer cleanup()
+
+			var capturedToolNames []string
+			var payloadErr string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload KiroPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					payloadErr = err.Error()
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				ctx := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+				if ctx == nil || len(ctx.Tools) < 2 {
+					payloadErr = "expected two namespaced tools in Kiro payload"
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				for _, tool := range ctx.Tools {
+					capturedToolNames = append(capturedToolNames, tool.ToolSpecification.Name)
+				}
+
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+					"toolUseId": "call_canva",
+					"name":      capturedToolNames[0],
+					"input":     `{"query":"deck"}`,
+					"stop":      true,
+				}))
+				_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+					"stopReason": "tool_use",
+				}))
+			}))
+			defer server.Close()
+			defer swapKiroEndpointsForTest(t, server)()
+
+			requestBody, err := json.Marshal(map[string]interface{}{
+				"model":  "claude-sonnet-4.5",
+				"input":  "find a deck",
+				"stream": stream,
+				"store":  false,
+				"tools": []interface{}{
+					map[string]interface{}{
+						"type": "namespace", "name": "mcp__canva",
+						"tools": []interface{}{map[string]interface{}{
+							"type": "function", "name": "_search", "description": "Canva search",
+							"parameters": map[string]interface{}{"type": "object"},
+						}},
+					},
+					map[string]interface{}{
+						"type": "namespace", "name": "mcp__github",
+						"tools": []interface{}{map[string]interface{}{
+							"type": "function", "name": "_search", "description": "GitHub search",
+							"parameters": map[string]interface{}{"type": "object"},
+						}},
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("encode request: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(requestBody)))
+			rec := httptest.NewRecorder()
+			h.handleOpenAIResponses(rec, req)
+
+			if payloadErr != "" {
+				t.Fatalf("invalid Kiro payload: %s", payloadErr)
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+			}
+			if len(capturedToolNames) != 2 || capturedToolNames[0] == capturedToolNames[1] {
+				t.Fatalf("expected two unique Kiro aliases, got %v", capturedToolNames)
+			}
+			if capturedToolNames[0] == "_search" || capturedToolNames[1] == "_search" {
+				t.Fatalf("duplicate bare tool names were not disambiguated: %v", capturedToolNames)
+			}
+
+			if stream {
+				body := rec.Body.String()
+				if !strings.Contains(body, `"name":"_search"`) || !strings.Contains(body, `"namespace":"mcp__canva"`) {
+					t.Fatalf("stream did not restore Codex tool identity:\n%s", body)
+				}
+				if strings.Contains(body, capturedToolNames[0]) {
+					t.Fatalf("stream leaked Kiro alias %q:\n%s", capturedToolNames[0], body)
+				}
+				return
+			}
+
+			var resp ResponsesObject
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
+			}
+			if len(resp.Output) != 1 || resp.Output[0].Type != "function_call" ||
+				resp.Output[0].Name != "_search" || resp.Output[0].Namespace != "mcp__canva" {
+				t.Fatalf("non-stream response did not restore Codex tool identity: %+v", resp.Output)
+			}
+		})
+	}
+}
+
 func TestExtractResponsesToolsAdditionalTools(t *testing.T) {
 	raw := json.RawMessage(`[
 		{

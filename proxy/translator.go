@@ -1095,9 +1095,10 @@ type OpenAIMessage struct {
 }
 
 type ToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Namespace string `json:"namespace,omitempty"`
+	Function  struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
@@ -1195,7 +1196,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	var nonSystemMessages []OpenAIMessage
 
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
+		if msg.Role == "system" || msg.Role == "developer" {
 			if s := extractOpenAIMessageText(msg.Content); s != "" {
 				systemPrompt += s + "\n"
 			}
@@ -2118,23 +2119,17 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 		return nil
 	}
 
-	result := make([]KiroToolWrapper, 0, len(tools))
-	for _, tool := range tools {
-		if tool.Type != "function" && tool.Type != "custom" {
-			continue
-		}
+	bindings := buildKiroToolBindings(tools)
+	result := make([]KiroToolWrapper, 0, len(bindings))
+	for _, binding := range bindings {
+		tool := binding.Tool
 		desc := tool.Function.Description
 		if len(desc) > maxToolDescLen {
 			desc = desc[:maxToolDescLen] + "..."
 		}
-		name := shortenToolName(tool.Function.Name)
-		if strings.TrimSpace(name) == "" {
-			// Kiro rejects tools with empty names; skip unusable specs.
-			continue
-		}
 		wrapper := KiroToolWrapper{}
-		wrapper.ToolSpecification.Name = name
-		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
+		wrapper.ToolSpecification.Name = binding.KiroName
+		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, binding.KiroName)
 		if tool.Type == "custom" {
 			wrapper.ToolSpecification.InputSchema = InputSchema{JSON: customToolInputSchema}
 		} else {

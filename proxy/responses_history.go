@@ -98,6 +98,7 @@ func outputToMessages(items []ResponseOutputItem) []OpenAIMessage {
 			}
 			tc.Function.Name = item.Name
 			tc.Function.Arguments = item.Arguments
+			tc.Namespace = item.Namespace
 			out = append(out, OpenAIMessage{
 				Role:      "assistant",
 				Content:   "",

@@ -106,6 +106,7 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 				Type: "function",
 			}
 			tc.Function.Name, _ = obj["name"].(string)
+			tc.Namespace, _ = obj["namespace"].(string)
 			tc.Function.Arguments = stringifyArbitrary(obj["arguments"])
 			messages = appendAssistantToolCall(messages, tc)
 

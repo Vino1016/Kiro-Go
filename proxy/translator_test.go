@@ -111,6 +111,36 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 	}
 }
 
+func TestOpenAIToKiroPreservesDeveloperInstructions(t *testing.T) {
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: "base-system-instruction"},
+			{Role: "developer", Content: "read the selected computer-use skill before acting"},
+			{Role: "user", Content: "inspect the current desktop"},
+		},
+	}
+
+	payload := OpenAIToKiro(req, false)
+
+	if len(payload.ConversationState.History) < 2 {
+		t.Fatalf("expected a priming pair, got %d history items", len(payload.ConversationState.History))
+	}
+	priming := payload.ConversationState.History[0].UserInputMessage
+	if priming == nil {
+		t.Fatal("expected first history item to contain system/developer instructions")
+	}
+	if !strings.Contains(priming.Content, "base-system-instruction") {
+		t.Fatalf("expected system instruction in priming content, got %q", priming.Content)
+	}
+	if !strings.Contains(priming.Content, "read the selected computer-use skill before acting") {
+		t.Fatalf("expected developer instruction in priming content, got %q", priming.Content)
+	}
+	if got := payload.ConversationState.CurrentMessage.UserInputMessage.Content; got != "inspect the current desktop" {
+		t.Fatalf("expected user content to remain current message, got %q", got)
+	}
+}
+
 func TestOpenAIToKiroAssistantMapContentInHistory(t *testing.T) {
 	req := &OpenAIRequest{
 		Model: "claude-sonnet-4.5",
