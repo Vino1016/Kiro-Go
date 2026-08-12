@@ -41,6 +41,10 @@ flowchart LR
 
 因此，这不是“在一个 Provider 中混用两家的额度”。切到 `Kiro-Go Local` 后，该 Provider 下所有模型请求都走 Kiro-Go；要使用 OpenAI 官方模型和额度，需要切回 `default` Provider。
 
+![img.png](img.png)
+![img_1.png](img_1.png)
+![iShot_2026-08-12_15.07.40.png](iShot_2026-08-12_15.07.40.png)
+
 ## 2. Kiro-Go 的作用、原项目与分支选择
 
 ### 2.1 Kiro-Go 的作用
@@ -156,6 +160,8 @@ http://127.0.0.1:8080/v1
 该 Provider 下选择的所有模型都会调用 Kiro-Go，模型推理消耗 Kiro credits。即使模型名看起来像 OpenAI 原生模型，也不会绕过 Kiro-Go 调用 OpenAI 官方 API。
 
 ### 3.4 CC Switch 的作用
+
+![img_2.png](img_2.png)
 
 > 如果不希望使用cc-switch，可以直接在codex中配置proxy，直接让ai帮你配置即可，只是直接配置后做切换比较麻烦，适合自己没有开通gpt会员只使用kiro积分的开发者
 
