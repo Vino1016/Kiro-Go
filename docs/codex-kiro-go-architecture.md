@@ -74,25 +74,28 @@ https://github.com/Vino1016/Kiro-Go/tree/main_vino
 
 ### 2.3 Issue #151：新版 Codex 工具声明无法传给模型
 
-新版 Codex 会把部分工具声明放进 Responses `input[].additional_tools`，其中包括：
+新版 Codex 使用 Responses API 时，部分工具声明不再仅放在请求顶层的 `tools` 字段，而是通过 `input[].additional_tools` 传递，其中包括：
 
-- Codex 内置 `exec` custom tool；
+- Codex 内置的 `exec` custom tool（承载 Shell、文件和 Git 操作）；
 - 普通 function tools；
-- MCP/协作工具的 namespace 包装。
+- MCP 工具及协作工具的 namespace 包装。
 
-旧版 Kiro-Go 只读取顶层 `tools`，导致请求能够正常聊天，但 Kiro 模型看不到 Shell、文件、Git 和 MCP 工具。
+旧版 Kiro-Go 只解析顶层 `tools`，因此请求虽然能够正常对话，但 Kiro 模型实际收不到 Shell、文件、Git、MCP 及协作工具的声明，表现为“已配置但不可调用”。
 
-`main_vino` 已补充：
+`main_vino` 已完成兼容修复：
 
-- 提取 `additional_tools`；
-- 展开 namespace 工具；
-- 支持 `custom_tool_call` 和 `custom_tool_call_output`；
-- 流式返回 Codex 能识别的 custom/function tool-call 事件；
-- 清理 Kiro 不接受的工具 Schema 字段。
+- 提取并合并 `input[].additional_tools`；
+- 展开 namespace 包装，同时保留 namespace 身份以便 Codex 正确分发回调；
+- 支持 `custom_tool_call`、`custom_tool_call_output` 和 `agent_message` 的多轮回传；
+- 将 Kiro 返回统一转换为 Codex 可识别的 custom/function tool-call 流式与非流式事件；
+- 清理 Kiro 不接受的工具 Schema 字段；
+- 支持 Codex Multi-Agent 协作工具的调用与结果回传。
 
 问题详情：[Quorinex/Kiro-Go #151](https://github.com/Quorinex/Kiro-Go/issues/151)。
 
-- 注意kiro-GO中还有一个潜在问题，导致现在codex接入kiro-GO之后依然无法使用browser use和computer use两个codex的特色功能，修复方案有但比较麻烦这里就不做修复，需要使用这两个功能请使用自己的原生codex账号。
+需要注意：上述修复解决的是“工具声明和工具调用链路”兼容问题。Browser Use 与 Computer Use 属于 Codex 的 Skill 驱动能力，除工具本身外，还依赖 Codex 向模型传递 Skill 触发规则、Skill 文件路径及运行说明。Kiro-Go 在这部分仍存在兼容风险，因此经由 Kiro-Go Local 接入时，Browser Use 和 Computer Use 可能仍无法稳定使用。
+
+这两个能力的完整兼容需要继续处理 Codex `developer` 指令、Skill 生命周期及运行时环境的转发，改动范围较大，本次不纳入修复。需要使用 Browser Use 或 Computer Use 时，建议切回原生 Codex 账号/模型会话。
 
 ### 2.4 Issue #147：企业 IdC 账号被误判为截断响应
 
