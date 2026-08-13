@@ -824,7 +824,7 @@ func UpdateAccountProfileArn(id, profileArn string) error {
 			return nil
 		}
 	}
-	return nil
+	return ErrAccountNotFound
 }
 
 func DeleteAccount(id string) error {

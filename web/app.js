@@ -1025,8 +1025,12 @@
     try {
       const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
       const d = await res.json();
-      if (d.success) loadAccounts();
-      else toastError(t('accounts.refreshFailed') + ': ' + (d.error || ''));
+      await loadAccounts();
+      if (d.success && d.warningCode === 'profile_metadata_unavailable') {
+        toastWarning(t('accounts.profileMetadataUnavailable'));
+      } else if (!d.success) {
+        toastError(t('accounts.refreshFailed') + ': ' + (d.error || ''));
+      }
     } catch (e) {
       toastError(t('accounts.refreshFailed'));
     }
@@ -3564,6 +3568,9 @@
     setInterval(() => {
       if (!$('mainPage').classList.contains('hidden')) loadStats();
     }, 10000);
+    setInterval(() => {
+      if (!$('mainPage').classList.contains('hidden')) loadAccounts();
+    }, 30000);
   }
 
   if (document.readyState === 'loading') {

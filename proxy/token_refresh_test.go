@@ -8,6 +8,7 @@ import (
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,6 +161,121 @@ func TestRefreshAccountTokenDoesNotPublishWhenPersistenceFails(t *testing.T) {
 		persisted[0].AccessToken != initial.AccessToken ||
 		persisted[0].RefreshToken != initial.RefreshToken {
 		t.Fatalf("in-memory config retained unpersisted tokens: %+v", persisted)
+	}
+}
+
+func TestRefreshExpiringTokensRunsWithoutProfileMetadata(t *testing.T) {
+	h, initial, _ := newRotatingExternalIDPHandler(t)
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: tokenRefreshRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return tokenRefreshJSONResponse(request, "access-renewed", "refresh-renewed"), nil
+		}),
+	}
+	previousClient := auth.SetGlobalAuthClientForTest(client)
+	t.Cleanup(func() { auth.SetGlobalAuthClientForTest(previousClient) })
+
+	h.refreshExpiringTokens()
+
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 {
+		t.Fatalf("persisted accounts = %d, want 1", len(accounts))
+	}
+	if accounts[0].AccessToken != "access-renewed" || accounts[0].RefreshToken != "refresh-renewed" {
+		t.Fatalf("credential was not renewed: access=%q refresh=%q", accounts[0].AccessToken, accounts[0].RefreshToken)
+	}
+	if accounts[0].ExpiresAt <= time.Now().Unix() {
+		t.Fatalf("expiresAt = %d, want a future timestamp", accounts[0].ExpiresAt)
+	}
+	if initial.ProfileArn != "" || accounts[0].ProfileArn != "" {
+		t.Fatal("credential renewal unexpectedly required profile metadata")
+	}
+}
+
+func TestAPIRefreshAccountDegradesWhenProfileMetadataIsUnavailable(t *testing.T) {
+	h, initial, _ := newRotatingExternalIDPHandler(t)
+	authClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: tokenRefreshRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return tokenRefreshJSONResponse(request, "access-renewed", "refresh-renewed"), nil
+		}),
+	}
+	previousAuthClient := auth.SetGlobalAuthClientForTest(authClient)
+	t.Cleanup(func() { auth.SetGlobalAuthClientForTest(previousAuthClient) })
+
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: tokenRefreshRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Path != "/ListAvailableProfiles" {
+				t.Fatalf("unexpected Kiro REST path %q", request.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"profiles":[]}`)),
+				Request:    request,
+			}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	recorder := httptest.NewRecorder()
+	h.apiRefreshAccount(recorder, httptest.NewRequest(http.MethodPost, "/", nil), initial.ID)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Success             bool   `json:"success"`
+		CredentialRefreshed bool   `json:"credentialRefreshed"`
+		MetadataRefreshed   bool   `json:"metadataRefreshed"`
+		WarningCode         string `json:"warningCode"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Success || !response.CredentialRefreshed || response.MetadataRefreshed {
+		t.Fatalf("unexpected degraded response: %+v", response)
+	}
+	if response.WarningCode != "profile_metadata_unavailable" {
+		t.Fatalf("warningCode = %q", response.WarningCode)
+	}
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 || accounts[0].AccessToken != "access-renewed" || accounts[0].ExpiresAt <= time.Now().Unix() {
+		t.Fatalf("renewed credential was not persisted: %+v", accounts)
+	}
+}
+
+func TestAPISetAccountProfileValidatesAndPersistsARN(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Init(configPath); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	account := config.Account{ID: "profile-sync-account", Enabled: true, AccessToken: "access"}
+	if err := config.AddAccount(account); err != nil {
+		t.Fatalf("config.AddAccount: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p}
+	profileARN := "arn:aws:codewhisperer:us-east-1:123456789012:profile/official_profile"
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/"+account.ID+"/profile", strings.NewReader(`{"profileArn":"`+profileARN+`"}`))
+	request.Header.Set("X-Admin-Password", config.GetPassword())
+	h.handleAdminAPI(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 || accounts[0].ProfileArn != profileARN {
+		t.Fatalf("profile ARN was not persisted: %+v", accounts)
+	}
+
+	invalidRecorder := httptest.NewRecorder()
+	invalidRequest := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/"+account.ID+"/profile", strings.NewReader(`{"profileArn":"not-an-arn"}`))
+	invalidRequest.Header.Set("X-Admin-Password", config.GetPassword())
+	h.handleAdminAPI(invalidRecorder, invalidRequest)
+	if invalidRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid ARN status = %d, want 400", invalidRecorder.Code)
 	}
 }
 

@@ -46,6 +46,7 @@
   "accounts.banned": "已封禁",
   "accounts.suspended": "已暂停",
   "accounts.refreshFailed": "刷新失败",
+  "accounts.profileMetadataUnavailable": "账户凭证有效，但暂时无法获取 Kiro Profile、用量和订阅信息",
   "accounts.confirmDelete": "确定删除？",
   "accounts.deleteSuccess": "账号已删除",
   "accounts.mainQuota": "主配额",

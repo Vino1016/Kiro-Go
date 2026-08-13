@@ -19,7 +19,11 @@ import (
 	"github.com/google/uuid"
 )
 
-const tokenRefreshSkewSeconds int64 = 120
+const (
+	tokenRefreshSkewSeconds    int64 = 120
+	tokenRefreshCheckInterval        = time.Minute
+	accountInfoRefreshInterval       = 30 * time.Minute
+)
 
 const (
 	microsoftProfileSelectionTTL          = 10 * time.Minute
@@ -303,19 +307,27 @@ func NewHandler() *Handler {
 	return h
 }
 
-// backgroundRefresh 后台定时刷新账户信息
+// backgroundRefresh independently renews OAuth credentials and refreshes
+// account metadata. Credential renewal must run more frequently than the
+// two-minute expiry skew so an account never waits for the metadata ticker.
 func (h *Handler) backgroundRefresh() {
-	ticker := time.NewTicker(30 * time.Minute) // 每 30 分钟刷新一次
-	defer ticker.Stop()
+	tokenTicker := time.NewTicker(tokenRefreshCheckInterval)
+	defer tokenTicker.Stop()
+	accountInfoTicker := time.NewTicker(accountInfoRefreshInterval)
+	defer accountInfoTicker.Stop()
 
 	// 启动时延迟 10 秒后执行一次
 	time.Sleep(10 * time.Second)
+	h.refreshExpiringTokens()
 	h.refreshModelsCache()
 	h.refreshAllAccounts()
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-tokenTicker.C:
+			h.refreshExpiringTokens()
+		case <-accountInfoTicker.C:
+			h.refreshExpiringTokens()
 			h.refreshModelsCache()
 			h.refreshAllAccounts()
 		case <-h.stopRefresh:
@@ -324,30 +336,43 @@ func (h *Handler) backgroundRefresh() {
 	}
 }
 
-// refreshAllAccounts 刷新所有账户信息
-func (h *Handler) refreshAllAccounts() {
+// refreshExpiringTokens renews credentials without depending on richer Kiro
+// profile/usage APIs, which may be unavailable for an otherwise valid account.
+func (h *Handler) refreshExpiringTokens() {
 	accounts := config.GetAccounts()
 	for i := range accounts {
 		account := &accounts[i]
-		if !account.Enabled {
+		if !account.Enabled || config.IsAPIKeyAccount(account) {
 			continue
 		}
 		if accountBearerToken(account) == "" {
 			continue
 		}
-
-		// API Key accounts skip OAuth refresh; still sync usage/subscription.
-		if !config.IsAPIKeyAccount(account) {
-			// 检查 token 是否需要刷新
-			if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
-				if _, err := h.refreshAccountToken(account, false); err != nil {
-					logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
-					h.handleAccountFailure(account, err)
-					continue
-				}
-			}
+		if account.ExpiresAt <= 0 || time.Now().Unix() < account.ExpiresAt-tokenRefreshSkewSeconds {
+			continue
 		}
+		refreshed, err := h.refreshAccountToken(account, false)
+		if err != nil {
+			logger.Warnf("[BackgroundTokenRefresh] Token refresh failed for %s: %v", account.Email, err)
+			h.handleAccountFailure(account, err)
+			continue
+		}
+		if refreshed {
+			logger.Infof("[BackgroundTokenRefresh] Refreshed credential for %s", account.Email)
+		}
+	}
+	h.pool.Reload()
+}
 
+// refreshAllAccounts refreshes usage and subscription metadata. OAuth token
+// renewal is intentionally handled by refreshExpiringTokens.
+func (h *Handler) refreshAllAccounts() {
+	accounts := config.GetAccounts()
+	for i := range accounts {
+		account := &accounts[i]
+		if !account.Enabled || accountBearerToken(account) == "" {
+			continue
+		}
 		// 刷新账户信息
 		info, err := RefreshAccountInfo(account)
 		if err != nil {
@@ -2431,6 +2456,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models/refresh") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models/refresh")
 		h.apiRefreshAccountModels(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/profile") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/profile")
+		h.apiSetAccountProfile(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/refresh") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/refresh")
 		h.apiRefreshAccount(w, r, id)
@@ -2562,6 +2590,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"banReason":         a.BanReason,
 			"banTime":           a.BanTime,
 			"expiresAt":         a.ExpiresAt,
+			"hasProfileArn":     strings.TrimSpace(a.ProfileArn) != "",
 			"hasToken":          accountBearerToken(&a) != "",
 			"machineId":         a.MachineId,
 			"weight":            a.Weight,
@@ -2593,6 +2622,37 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	json.NewEncoder(w).Encode(result)
+}
+
+// apiSetAccountProfile stores a profile selected by a trusted local client.
+// The ARN is validated here so the app does not need to understand Kiro-Go's
+// persisted account schema.
+func (h *Handler) apiSetAccountProfile(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		ProfileARN string `json:"profileArn"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	profileARN, _, ok := parseKiroProfileArn(req.ProfileARN)
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "profileArn is invalid"})
+		return
+	}
+	if err := config.UpdateAccountProfileArn(id, profileARN); err != nil {
+		if errors.Is(err, config.ErrAccountNotFound) {
+			w.WriteHeader(http.StatusNotFound)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	h.pool.Reload()
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
@@ -4207,11 +4267,13 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// 先尝试刷新 token（不管是否过期，确保 token 有效）
+	credentialRefreshed := false
 	refreshTokenIfNeeded := func() error {
 		if account.RefreshToken == "" {
 			return nil
 		}
-		_, err := h.refreshAccountToken(account, true)
+		refreshed, err := h.refreshAccountToken(account, true)
+		credentialRefreshed = credentialRefreshed || refreshed
 		return err
 	}
 
@@ -4258,6 +4320,16 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 
 		// 其他错误才显示错误信息
 		if err != nil {
+			if isProfileUnavailableErrorMessage(err.Error()) {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success":             true,
+					"credentialRefreshed": credentialRefreshed,
+					"metadataRefreshed":   false,
+					"warningCode":         "profile_metadata_unavailable",
+					"warning":             "Kiro profile metadata is currently unavailable",
+				})
+				return
+			}
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return

@@ -46,6 +46,7 @@
   "accounts.banned": "Banned",
   "accounts.suspended": "Suspended",
   "accounts.refreshFailed": "Refresh failed",
+  "accounts.profileMetadataUnavailable": "Account credentials are valid, but Kiro profile, usage, and subscription metadata are temporarily unavailable",
   "accounts.confirmDelete": "Confirm delete?",
   "accounts.deleteSuccess": "Account deleted",
   "accounts.mainQuota": "Main Quota",

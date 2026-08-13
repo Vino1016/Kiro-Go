@@ -46,6 +46,7 @@
   "accounts.banned": "Bị cấm",
   "accounts.suspended": "Tạm ngưng",
   "accounts.refreshFailed": "Làm mới thất bại",
+  "accounts.profileMetadataUnavailable": "Thông tin xác thực tài khoản hợp lệ, nhưng dữ liệu hồ sơ Kiro, mức sử dụng và gói đăng ký tạm thời không khả dụng",
   "accounts.confirmDelete": "Xác nhận xóa?",
   "accounts.deleteSuccess": "Đã xóa tài khoản",
   "accounts.mainQuota": "Hạn mức chính",
