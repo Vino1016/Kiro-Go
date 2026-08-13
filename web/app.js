@@ -6,6 +6,10 @@
 
   // State
   const baseUrl = location.origin;
+  const apiOriginOverride = typeof window.__KIRO_GO_API_ORIGIN__ === 'string'
+    ? window.__KIRO_GO_API_ORIGIN__.trim().replace(/\/$/, '')
+    : '';
+  const publicApiBaseUrl = apiOriginOverride || baseUrl;
   if (localStorage.getItem('kiro_remember') !== '1') {
     localStorage.removeItem('admin_password');
     localStorage.removeItem('admin_login_time');
@@ -673,11 +677,11 @@
   // Data loaders
   async function loadData() {
     await Promise.all([loadStats(), loadAccounts(), loadSettings(), loadVersion()]);
-    renderEndpointCode('claudeEndpoint', baseUrl + '/v1/messages');
-    renderEndpointCode('openaiEndpoint', baseUrl + '/v1/chat/completions');
-    renderEndpointCode('openaiResponsesEndpoint', baseUrl + '/v1/responses');
-    renderEndpointCode('modelsEndpoint', baseUrl + '/v1/models');
-    renderEndpointCode('statsEndpoint', baseUrl + '/v1/stats');
+    renderEndpointCode('claudeEndpoint', publicApiBaseUrl + '/v1/messages');
+    renderEndpointCode('openaiEndpoint', publicApiBaseUrl + '/v1/chat/completions');
+    renderEndpointCode('openaiResponsesEndpoint', publicApiBaseUrl + '/v1/responses');
+    renderEndpointCode('modelsEndpoint', publicApiBaseUrl + '/v1/models');
+    renderEndpointCode('statsEndpoint', publicApiBaseUrl + '/v1/stats');
     setTimeout(checkUpdate, 2000);
   }
   async function loadStats() {
