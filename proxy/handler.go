@@ -2676,15 +2676,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.pool.Reload()
-	// 新账号若已启用且有 token，立即拉取并缓存模型列表
-	if account.Enabled && account.AccessToken != "" {
-		go func(acc config.Account) {
-			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
-				logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", acc.Email, err)
-			}
-		}(account)
-	}
+	h.finishAccountAddition(&account)
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "id": account.ID})
 }
 
@@ -3018,7 +3010,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.pool.Reload()
+	h.finishAccountAddition(&account)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
@@ -3157,7 +3149,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 	}
 	delete(h.microsoftCanceled, strings.TrimSpace(req.SessionID))
 	h.microsoftFlowMu.Unlock()
-	h.pool.Reload()
+	h.finishAccountAddition(&account)
 
 	response := map[string]interface{}{
 		"success": true,
@@ -3242,7 +3234,7 @@ func (h *Handler) apiSelectMicrosoftSSOProfile(w http.ResponseWriter, r *http.Re
 	delete(h.microsoftCanceled, selection.SessionID)
 	h.microsoftFlowMu.Unlock()
 	selection.mu.Unlock()
-	h.pool.Reload()
+	h.finishAccountAddition(&account)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"stage":   "complete",
@@ -3608,7 +3600,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.pool.Reload()
+	h.finishAccountAddition(&account)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"completed": true,
@@ -3676,13 +3668,12 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		h.finishAccountAddition(&account)
 		imported = append(imported, map[string]interface{}{
 			"id":    account.ID,
 			"email": account.Email,
 		})
 	}
-
-	h.pool.Reload()
 
 	if len(imported) == 0 && len(errors) > 0 {
 		w.WriteHeader(500)
@@ -3792,14 +3783,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			h.writeAddAccountError(w, err)
 			return
 		}
-		h.pool.Reload()
-		if account.Enabled && account.AccessToken != "" {
-			go func(acc config.Account) {
-				if err := h.fetchAndCacheAccountModels(&acc); err != nil {
-					logger.Warnf("[ModelsCache] Auto-refresh failed for new API key account %s: %v", acc.Email, err)
-				}
-			}(account)
-		}
+		h.finishAccountAddition(&account)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"account": map[string]interface{}{
@@ -4027,7 +4011,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.pool.Reload()
+	h.finishAccountAddition(&account)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
